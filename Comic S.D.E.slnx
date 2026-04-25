@@ -1,0 +1,7 @@
+<Solution>
+  <Configurations>
+    <Platform Name="x64" />
+    <Platform Name="x86" />
+  </Configurations>
+  <Project Path="Comic S.D.E/Comic S.D.E.vcxproj" Id="bf922b01-2c2d-4a0f-81f6-ef4323b9ca5e" />
+</Solution>
