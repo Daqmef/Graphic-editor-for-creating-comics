@@ -1,7 +1,616 @@
-<Solution>
-  <Configurations>
-    <Platform Name="x64" />
-    <Platform Name="x86" />
-  </Configurations>
-  <Project Path="Comic S.D.E/Comic S.D.E.vcxproj" Id="bf922b01-2c2d-4a0f-81f6-ef4323b9ca5e" />
-</Solution>
+#include <windows.h>
+#include <iostream>
+#include <string>
+#include <cmath>
+#include <vector>
+#include <fstream>
+#include <ctime>
+
+using namespace std;
+
+//  КОНСТАНТЫ 
+const int WINDOW_WIDTH = 1200;
+const int WINDOW_HEIGHT = 800;
+const int TOOLBAR_WIDTH = 200;
+const int DRAWING_WIDTH = WINDOW_WIDTH - TOOLBAR_WIDTH;
+
+//  ПЕРЕЧИСЛЕНИЯ 
+enum Tool {
+    TOOL_PENCIL = 0,
+    TOOL_RECTANGLE,
+    TOOL_CIRCLE,
+    TOOL_TEXT,
+    TOOL_ERASER
+};
+
+//  СТРУКТУРЫ ДАННЫХ 
+struct DrawingPoint {
+    int x, y;
+    COLORREF color;
+    int size;
+};
+
+struct DrawingRect {
+    int x1, y1, x2, y2;
+    COLORREF color;
+    int thickness;
+};
+
+struct DrawingCircle {
+    int cx, cy, radius;
+    COLORREF color;
+    int thickness;
+};
+
+struct DrawingText {
+    int x, y;
+    string text;
+    COLORREF color;
+    int fontSize;
+};
+
+//  ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ 
+HWND g_hWnd = NULL;
+HDC g_hdcMem = NULL;
+HBITMAP g_hBitmap = NULL;
+HBITMAP g_hOldBitmap = NULL;
+
+// Состояние рисования
+bool g_isDrawing = false;
+int g_currentTool = TOOL_PENCIL;
+COLORREF g_currentColor = RGB(0, 0, 0);
+int g_brushSize = 3;
+int g_startX = 0, g_startY = 0;
+int g_lastX = 0, g_lastY = 0;
+
+// Для текста
+bool g_isTyping = false;
+string g_currentText;
+int g_textX = 0, g_textY = 0;
+
+// Хранилища рисунков
+vector<DrawingPoint> g_points;
+vector<DrawingRect> g_rects;
+vector<DrawingCircle> g_circles;
+vector<DrawingText> g_texts;
+
+//  ПРОТОТИПЫ ФУНКЦИЙ 
+LRESULT CALLBACK WndProc(HWND, UINT, WPARAM, LPARAM);
+void DrawUI(HDC hdc);
+void DrawAllElements();
+void ClearCanvas();
+void SaveComic();
+void LoadComic();
+void RedrawWindow();
+
+//  ТОЧКА ВХОДА 
+int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {
+    cout << "=== COMIC CREATOR - Редактор комиксов ===" << endl;
+    cout << "Запуск программы..." << endl;
+
+    // Регистрация класса окна
+    WNDCLASSEX wc = { 0 };
+    wc.cbSize = sizeof(WNDCLASSEX);
+    wc.lpfnWndProc = WndProc;
+    wc.hInstance = hInstance;
+    wc.hCursor = LoadCursor(NULL, IDC_CROSS);
+    wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
+    wc.lpszClassName = L"ComicCreatorClass";
+
+    if (!RegisterClassEx(&wc)) {
+        cout << "Ошибка регистрации окна!" << endl;
+        return 0;
+    }
+
+    // Создание окна
+    g_hWnd = CreateWindowEx(0, L"ComicCreatorClass", L"COMIC CREATOR - Редактор комиксов",
+        WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+        CW_USEDEFAULT, CW_USEDEFAULT, WINDOW_WIDTH, WINDOW_HEIGHT,
+        NULL, NULL, hInstance, NULL);
+
+    if (!g_hWnd) {
+        cout << "Ошибка создания окна!" << endl;
+        return 0;
+    }
+
+    // Создание буфера для рисования
+    HDC hdcScreen = GetDC(g_hWnd);
+    g_hdcMem = CreateCompatibleDC(hdcScreen);
+    g_hBitmap = CreateCompatibleBitmap(hdcScreen, DRAWING_WIDTH, WINDOW_HEIGHT);
+    g_hOldBitmap = (HBITMAP)SelectObject(g_hdcMem, g_hBitmap);
+
+    // Заливка белым цветом
+    RECT rect = { 0, 0, DRAWING_WIDTH, WINDOW_HEIGHT };
+    HBRUSH whiteBrush = CreateSolidBrush(RGB(255, 255, 255));
+    FillRect(g_hdcMem, &rect, whiteBrush);
+    DeleteObject(whiteBrush);
+
+    ReleaseDC(g_hWnd, hdcScreen);
+
+    cout << "Окно создано. Используйте мышь и клавиши для рисования." << endl;
+    cout << "Нажмите '1-5' для выбора инструмента, 'S' - сохранить, 'C' - очистить" << endl;
+
+    ShowWindow(g_hWnd, nCmdShow);
+    UpdateWindow(g_hWnd);
+
+    // Главный цикл сообщений
+    MSG msg;
+    while (GetMessage(&msg, NULL, 0, 0)) {
+        TranslateMessage(&msg);
+        DispatchMessage(&msg);
+    }
+
+    // Очистка ресурсов
+    SelectObject(g_hdcMem, g_hOldBitmap);
+    DeleteObject(g_hBitmap);
+    DeleteDC(g_hdcMem);
+
+    cout << "Программа завершена." << endl;
+    return msg.wParam;
+}
+
+//  ОБРАБОТЧИК ОКНА 
+LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    PAINTSTRUCT ps;
+    HDC hdc;
+
+    switch (msg) {
+    case WM_PAINT:
+        hdc = BeginPaint(hwnd, &ps);
+        // Копируем буфер на экран
+        BitBlt(hdc, TOOLBAR_WIDTH, 0, DRAWING_WIDTH, WINDOW_HEIGHT, g_hdcMem, 0, 0, SRCCOPY);
+        DrawUI(hdc);
+        EndPaint(hwnd, &ps);
+        break;
+
+    case WM_LBUTTONDOWN: {
+        int x = LOWORD(lParam);
+        int y = HIWORD(lParam);
+
+        if (x >= TOOLBAR_WIDTH) {
+            g_isDrawing = true;
+            g_startX = x - TOOLBAR_WIDTH;
+            g_startY = y;
+            g_lastX = g_startX;
+            g_lastY = g_startY;
+
+            if (g_currentTool == TOOL_PENCIL) {
+                DrawingPoint p = { g_startX, g_startY, g_currentColor, g_brushSize };
+                g_points.push_back(p);
+
+                HBRUSH brush = CreateSolidBrush(g_currentColor);
+                RECT rect = { g_startX - g_brushSize / 2, g_startY - g_brushSize / 2,
+                            g_startX + g_brushSize / 2, g_startY + g_brushSize / 2 };
+                FillRect(g_hdcMem, &rect, brush);
+                DeleteObject(brush);
+                InvalidateRect(hwnd, NULL, FALSE);
+            }
+            else if (g_currentTool == TOOL_TEXT) {
+                g_textX = g_startX;
+                g_textY = g_startY;
+                g_isTyping = true;
+                g_currentText = "";
+                cout << "Введите текст и нажмите Enter: ";
+            }
+        }
+        else {
+            // Кнопки панели инструментов
+            if (y >= 50 && y <= 80) g_currentTool = TOOL_PENCIL;
+            else if (y >= 90 && y <= 120) g_currentTool = TOOL_RECTANGLE;
+            else if (y >= 130 && y <= 160) g_currentTool = TOOL_CIRCLE;
+            else if (y >= 170 && y <= 200) g_currentTool = TOOL_TEXT;
+            else if (y >= 210 && y <= 240) g_currentTool = TOOL_ERASER;
+            else if (y >= 270 && y <= 300) g_currentColor = RGB(255, 0, 0);
+            else if (y >= 310 && y <= 340) g_currentColor = RGB(0, 255, 0);
+            else if (y >= 350 && y <= 380) g_currentColor = RGB(0, 0, 255);
+            else if (y >= 390 && y <= 420) g_currentColor = RGB(0, 0, 0);
+            else if (y >= 430 && y <= 460) g_currentColor = RGB(255, 255, 255);
+            else if (y >= 490 && y <= 520) ClearCanvas();
+            else if (y >= 530 && y <= 560) SaveComic();
+            else if (y >= 570 && y <= 600) LoadComic();
+
+            InvalidateRect(hwnd, NULL, FALSE);
+        }
+        break;
+    }
+
+    case WM_MOUSEMOVE:
+        if (g_isDrawing && g_currentTool == TOOL_PENCIL) {
+            int x = LOWORD(lParam);
+            int y = HIWORD(lParam);
+
+            if (x >= TOOLBAR_WIDTH) {
+                int curX = x - TOOLBAR_WIDTH;
+                int curY = y;
+
+                // Рисуем линию
+                HPEN pen = CreatePen(PS_SOLID, g_brushSize, g_currentColor);
+                HPEN oldPen = (HPEN)SelectObject(g_hdcMem, pen);
+                MoveToEx(g_hdcMem, g_lastX, g_lastY, NULL);
+                LineTo(g_hdcMem, curX, curY);
+                SelectObject(g_hdcMem, oldPen);
+                DeleteObject(pen);
+
+                // Сохраняем точки
+                int steps = max(abs(curX - g_lastX), abs(curY - g_lastY));
+                for (int i = 1; i <= steps; i++) {
+                    int xi = g_lastX + (curX - g_lastX) * i / steps;
+                    int yi = g_lastY + (curY - g_lastY) * i / steps;
+                    DrawingPoint p = { xi, yi, g_currentColor, g_brushSize };
+                    g_points.push_back(p);
+                }
+
+                g_lastX = curX;
+                g_lastY = curY;
+
+                RECT rect = { TOOLBAR_WIDTH, 0, WINDOW_WIDTH, WINDOW_HEIGHT };
+                InvalidateRect(hwnd, &rect, FALSE);
+            }
+        }
+        else if (g_isDrawing && g_currentTool == TOOL_ERASER) {
+            int x = LOWORD(lParam);
+            int y = HIWORD(lParam);
+
+            if (x >= TOOLBAR_WIDTH) {
+                int curX = x - TOOLBAR_WIDTH;
+                int curY = y;
+
+                HBRUSH whiteBrush = CreateSolidBrush(RGB(255, 255, 255));
+                RECT rect = { curX - g_brushSize / 2, curY - g_brushSize / 2,
+                            curX + g_brushSize / 2, curY + g_brushSize / 2 };
+                FillRect(g_hdcMem, &rect, whiteBrush);
+                DeleteObject(whiteBrush);
+
+                InvalidateRect(hwnd, NULL, FALSE);
+            }
+        }
+        break;
+
+    case WM_LBUTTONUP:
+        if (g_isDrawing) {
+            int x = LOWORD(lParam);
+            int y = HIWORD(lParam);
+
+            if (x >= TOOLBAR_WIDTH && (g_currentTool == TOOL_RECTANGLE || g_currentTool == TOOL_CIRCLE)) {
+                int endX = x - TOOLBAR_WIDTH;
+                int endY = y;
+
+                if (g_currentTool == TOOL_RECTANGLE) {
+                    DrawingRect r = { g_startX, g_startY, endX, endY, g_currentColor, g_brushSize };
+                    g_rects.push_back(r);
+
+                    HPEN pen = CreatePen(PS_SOLID, g_brushSize, g_currentColor);
+                    HBRUSH brush = CreateSolidBrush(RGB(255, 255, 255));
+                    HPEN oldPen = (HPEN)SelectObject(g_hdcMem, pen);
+                    HBRUSH oldBrush = (HBRUSH)SelectObject(g_hdcMem, brush);
+                    Rectangle(g_hdcMem, min(g_startX, endX), min(g_startY, endY),
+                        max(g_startX, endX), max(g_startY, endY));
+                    SelectObject(g_hdcMem, oldPen);
+                    SelectObject(g_hdcMem, oldBrush);
+                    DeleteObject(pen);
+                    DeleteObject(brush);
+                }
+                else if (g_currentTool == TOOL_CIRCLE) {
+                    int radius = (int)sqrt(pow((double)(endX - g_startX), 2) + pow((double)(endY - g_startY), 2));
+                    DrawingCircle c = { g_startX, g_startY, radius, g_currentColor, g_brushSize };
+                    g_circles.push_back(c);
+
+                    HPEN pen = CreatePen(PS_SOLID, g_brushSize, g_currentColor);
+                    HBRUSH brush = CreateSolidBrush(RGB(255, 255, 255));
+                    HPEN oldPen = (HPEN)SelectObject(g_hdcMem, pen);
+                    HBRUSH oldBrush = (HBRUSH)SelectObject(g_hdcMem, brush);
+                    Ellipse(g_hdcMem, g_startX - radius, g_startY - radius,
+                        g_startX + radius, g_startY + radius);
+                    SelectObject(g_hdcMem, oldPen);
+                    SelectObject(g_hdcMem, oldBrush);
+                    DeleteObject(pen);
+                    DeleteObject(brush);
+                }
+
+                InvalidateRect(hwnd, NULL, FALSE);
+            }
+            g_isDrawing = false;
+        }
+        break;
+
+    case WM_CHAR:
+        if (g_isTyping) {
+            if (wParam == VK_RETURN && !g_currentText.empty()) {
+                DrawingText dt = { g_textX, g_textY, g_currentText, g_currentColor, 24 };
+                g_texts.push_back(dt);
+
+                HFONT hFont = CreateFont(24, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                    DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                    DEFAULT_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Arial");
+                HFONT oldFont = (HFONT)SelectObject(g_hdcMem, hFont);
+                SetTextColor(g_hdcMem, g_currentColor);
+                SetBkMode(g_hdcMem, TRANSPARENT);
+
+                wstring wtext(g_currentText.begin(), g_currentText.end());
+                TextOut(g_hdcMem, g_textX, g_textY, wtext.c_str(), (int)wtext.length());
+
+                SelectObject(g_hdcMem, oldFont);
+                DeleteObject(hFont);
+
+                cout << "Текст размещен: " << g_currentText << endl;
+                g_isTyping = false;
+                g_currentText.clear();
+                InvalidateRect(hwnd, NULL, FALSE);
+            }
+            else if (wParam == VK_ESCAPE) {
+                cout << "Ввод текста отменен" << endl;
+                g_isTyping = false;
+                g_currentText.clear();
+            }
+            else if (wParam == VK_BACK && !g_currentText.empty()) {
+                g_currentText.pop_back();
+            }
+            else if (wParam >= 32 && wParam < 256) {
+                g_currentText += (char)wParam;
+                cout << (char)wParam;
+            }
+        }
+        break;
+
+    case WM_KEYDOWN:
+        switch (wParam) {
+        case '1': g_currentTool = TOOL_PENCIL; cout << "Инструмент: Карандаш" << endl; InvalidateRect(hwnd, NULL, FALSE); break;
+        case '2': g_currentTool = TOOL_RECTANGLE; cout << "Инструмент: Прямоугольник" << endl; InvalidateRect(hwnd, NULL, FALSE); break;
+        case '3': g_currentTool = TOOL_CIRCLE; cout << "Инструмент: Круг" << endl; InvalidateRect(hwnd, NULL, FALSE); break;
+        case '4': g_currentTool = TOOL_TEXT; cout << "Инструмент: Текст" << endl; InvalidateRect(hwnd, NULL, FALSE); break;
+        case '5': g_currentTool = TOOL_ERASER; cout << "Инструмент: Ластик" << endl; InvalidateRect(hwnd, NULL, FALSE); break;
+        case 'R': g_currentColor = RGB(255, 0, 0); cout << "Цвет: Красный" << endl; InvalidateRect(hwnd, NULL, FALSE); break;
+        case 'G': g_currentColor = RGB(0, 255, 0); cout << "Цвет: Зеленый" << endl; InvalidateRect(hwnd, NULL, FALSE); break;
+        case 'B': g_currentColor = RGB(0, 0, 255); cout << "Цвет: Синий" << endl; InvalidateRect(hwnd, NULL, FALSE); break;
+        case 'K': g_currentColor = RGB(0, 0, 0); cout << "Цвет: Черный" << endl; InvalidateRect(hwnd, NULL, FALSE); break;
+        case 'W': g_currentColor = RGB(255, 255, 255); cout << "Цвет: Белый" << endl; InvalidateRect(hwnd, NULL, FALSE); break;
+        case 'C': ClearCanvas(); cout << "Холст очищен" << endl; InvalidateRect(hwnd, NULL, FALSE); break;
+        case 'S': SaveComic(); break;
+        case 'L': LoadComic(); InvalidateRect(hwnd, NULL, FALSE); break;
+        case VK_UP: if (g_brushSize < 20) { g_brushSize++; cout << "Размер кисти: " << g_brushSize << endl; } InvalidateRect(hwnd, NULL, FALSE); break;
+        case VK_DOWN: if (g_brushSize > 1) { g_brushSize--; cout << "Размер кисти: " << g_brushSize << endl; } InvalidateRect(hwnd, NULL, FALSE); break;
+        }
+        break;
+
+    case WM_DESTROY:
+        PostQuitMessage(0);
+        break;
+    }
+
+    return DefWindowProc(hwnd, msg, wParam, lParam);
+}
+
+//  РИСОВАНИЕ ИНТЕРФЕЙСА 
+void DrawUI(HDC hdc) {
+    // Панель инструментов
+    RECT toolbarRect = { 0, 0, TOOLBAR_WIDTH, WINDOW_HEIGHT };
+    HBRUSH grayBrush = CreateSolidBrush(RGB(240, 240, 240));
+    FillRect(hdc, &toolbarRect, grayBrush);
+    DeleteObject(grayBrush);
+
+    // Рамка панели
+    HPEN blackPen = CreatePen(PS_SOLID, 2, RGB(0, 0, 0));
+    HPEN oldPen = (HPEN)SelectObject(hdc, blackPen);
+    MoveToEx(hdc, TOOLBAR_WIDTH - 1, 0, NULL);
+    LineTo(hdc, TOOLBAR_WIDTH - 1, WINDOW_HEIGHT);
+
+    // Заголовок
+    HFONT titleFont = CreateFont(24, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+        DEFAULT_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Arial");
+    HFONT oldFont = (HFONT)SelectObject(hdc, titleFont);
+    SetTextColor(hdc, RGB(0, 0, 255));
+    SetBkMode(hdc, TRANSPARENT);
+    TextOutW(hdc, 25, 15, L"COMIC", 5);
+    TextOutW(hdc, 25, 40, L"CREATOR", 7);
+
+    // Инструменты
+    HFONT normFont = CreateFont(14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+        DEFAULT_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Arial");
+    SelectObject(hdc, normFont);
+    SetTextColor(hdc, RGB(0, 0, 0));
+
+    TextOutW(hdc, 15, 80, L"ИНСТРУМЕНТЫ", 11);
+    TextOutW(hdc, 15, 100, L"[1] Карандаш", 12);
+    TextOutW(hdc, 15, 125, L"[2] Прямоугольник", 17);
+    TextOutW(hdc, 15, 150, L"[3] Круг", 8);
+    TextOutW(hdc, 15, 175, L"[4] Текст", 9);
+    TextOutW(hdc, 15, 200, L"[5] Ластик", 10);
+
+    TextOutW(hdc, 15, 240, L"ЦВЕТА", 6);
+    TextOutW(hdc, 15, 260, L"[R] Красный", 11);
+    TextOutW(hdc, 15, 285, L"[G] Зеленый", 11);
+    TextOutW(hdc, 15, 310, L"[B] Синий", 9);
+    TextOutW(hdc, 15, 335, L"[K] Черный", 10);
+    TextOutW(hdc, 15, 360, L"[W] Белый", 9);
+
+    TextOutW(hdc, 15, 400, L"ДЕЙСТВИЯ", 9);
+    TextOutW(hdc, 15, 420, L"[C] Очистить", 12);
+    TextOutW(hdc, 15, 445, L"[S] Сохранить", 13);
+    TextOutW(hdc, 15, 470, L"[L] Загрузить", 13);
+    TextOutW(hdc, 15, 495, L"[↑/↓] Размер", 13);
+
+    // Цветные квадратики
+    RECT colorRect;
+    HBRUSH brush;
+
+    colorRect = { 15, 530, 45, 560 };
+    brush = CreateSolidBrush(RGB(255, 0, 0));
+    FillRect(hdc, &colorRect, brush);
+    DeleteObject(brush);
+
+    colorRect = { 50, 530, 80, 560 };
+    brush = CreateSolidBrush(RGB(0, 255, 0));
+    FillRect(hdc, &colorRect, brush);
+    DeleteObject(brush);
+
+    colorRect = { 85, 530, 115, 560 };
+    brush = CreateSolidBrush(RGB(0, 0, 255));
+    FillRect(hdc, &colorRect, brush);
+    DeleteObject(brush);
+
+    colorRect = { 120, 530, 150, 560 };
+    brush = CreateSolidBrush(RGB(0, 0, 0));
+    FillRect(hdc, &colorRect, brush);
+    DeleteObject(brush);
+
+    colorRect = { 155, 530, 185, 560 };
+    brush = CreateSolidBrush(RGB(255, 255, 255));
+    FillRect(hdc, &colorRect, brush);
+    DeleteObject(brush);
+
+    // Текущий инструмент
+    const char* tools[] = { "Карандаш", "Прямоугольник", "Круг", "Text", "Ластик" };
+    char toolText[100];
+    sprintf_s(toolText, "Текущий: %s", tools[g_currentTool]);
+    TextOutA(hdc, 15, 590, toolText, (int)strlen(toolText));
+
+    // Текущий цвет
+    colorRect = { 15, 620, 45, 650 };
+    brush = CreateSolidBrush(g_currentColor);
+    FillRect(hdc, &colorRect, brush);
+    DeleteObject(brush);
+    Rectangle(hdc, 15, 620, 45, 650);
+    TextOutW(hdc, 55, 630, L"Цвет", 8);
+
+    // Размер кисти
+    char sizeText[50];
+    sprintf_s(sizeText, "Размер: %d", g_brushSize);
+    TextOutA(hdc, 15, 665, sizeText, (int)strlen(sizeText));
+
+    // Рисуем кисть
+    HBRUSH brushBrush = CreateSolidBrush(g_currentColor);
+    Ellipse(hdc, 30, 680, 30 + g_brushSize, 680 + g_brushSize);
+    DeleteObject(brushBrush);
+
+    // Помощь
+    TextOutW(hdc, 15, 710, L"ТЕКСТ:", 6);
+    TextOutW(hdc, 15, 730, L"Печатайте -> Enter", 19);
+    TextOutW(hdc, 15, 750, L"Esc - отмена", 12);
+
+    SelectObject(hdc, oldPen);
+    SelectObject(hdc, oldFont);
+    DeleteObject(blackPen);
+    DeleteObject(titleFont);
+    DeleteObject(normFont);
+}
+
+//  ОЧИСТКА ХОЛСТА 
+void ClearCanvas() {
+    RECT rect = { 0, 0, DRAWING_WIDTH, WINDOW_HEIGHT };
+    HBRUSH whiteBrush = CreateSolidBrush(RGB(255, 255, 255));
+    FillRect(g_hdcMem, &rect, whiteBrush);
+    DeleteObject(whiteBrush);
+
+    g_points.clear();
+    g_rects.clear();
+    g_circles.clear();
+    g_texts.clear();
+}
+
+//  СОХРАНЕНИЕ КОМИКСА 
+void SaveComic() {
+    time_t now = time(0);
+    struct tm timeinfo;
+    localtime_s(&timeinfo, &now);
+
+    char filename[100];
+    strftime(filename, sizeof(filename), "comic_%Y%m%d_%H%M%S.bmp", &timeinfo);
+
+    HDC hdcScreen = GetDC(g_hWnd);
+    HDC hdcMem = CreateCompatibleDC(hdcScreen);
+    HBITMAP hBitmap = CreateCompatibleBitmap(hdcScreen, DRAWING_WIDTH, WINDOW_HEIGHT);
+    HBITMAP hOldBitmap = (HBITMAP)SelectObject(hdcMem, hBitmap);
+
+    BitBlt(hdcMem, 0, 0, DRAWING_WIDTH, WINDOW_HEIGHT, g_hdcMem, 0, 0, SRCCOPY);
+
+    BITMAP bitmap;
+    GetObject(hBitmap, sizeof(BITMAP), &bitmap);
+
+    HANDLE hFile = CreateFileA(filename, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hFile != INVALID_HANDLE_VALUE) {
+        BITMAPFILEHEADER bfHeader = { 0 };
+        BITMAPINFOHEADER biHeader = { 0 };
+
+        bfHeader.bfType = 0x4D42; // 'BM'
+        bfHeader.bfSize = sizeof(BITMAPFILEHEADER) + sizeof(BITMAPINFOHEADER) + bitmap.bmWidthBytes * bitmap.bmHeight;
+        bfHeader.bfOffBits = sizeof(BITMAPFILEHEADER) + sizeof(BITMAPINFOHEADER);
+
+        biHeader.biSize = sizeof(BITMAPINFOHEADER);
+        biHeader.biWidth = bitmap.bmWidth;
+        biHeader.biHeight = bitmap.bmHeight;
+        biHeader.biPlanes = 1;
+        biHeader.biBitCount = 24;
+        biHeader.biCompression = BI_RGB;
+
+        DWORD dwWritten;
+        WriteFile(hFile, &bfHeader, sizeof(BITMAPFILEHEADER), &dwWritten, NULL);
+        WriteFile(hFile, &biHeader, sizeof(BITMAPINFOHEADER), &dwWritten, NULL);
+
+        BYTE* bits = new BYTE[bitmap.bmWidthBytes * bitmap.bmHeight];
+        GetBitmapBits(hBitmap, bitmap.bmWidthBytes * bitmap.bmHeight, bits);
+        WriteFile(hFile, bits, bitmap.bmWidthBytes * bitmap.bmHeight, &dwWritten, NULL);
+        delete[] bits;
+
+        CloseHandle(hFile);
+
+        string msg = "Комикс сохранен как: ";
+        msg += filename;
+        MessageBoxA(g_hWnd, msg.c_str(), "Сохранение", MB_OK);
+        cout << msg << endl;
+    }
+    else {
+        MessageBoxA(g_hWnd, "Ошибка сохранения файла!", "Ошибка", MB_OK);
+    }
+
+    SelectObject(hdcMem, hOldBitmap);
+    DeleteObject(hBitmap);
+    DeleteDC(hdcMem);
+    ReleaseDC(g_hWnd, hdcScreen);
+}
+
+//  ЗАГРУЗКА КОМИКСА 
+void LoadComic() {
+    OPENFILENAMEA ofn = { 0 };
+    char fileName[MAX_PATH] = "";
+
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = g_hWnd;
+    ofn.lpstrFilter = "Bitmap Files (*.bmp)\0*.bmp\0All Files (*.*)\0*.*\0";
+    ofn.lpstrFile = fileName;
+    ofn.nMaxFile = MAX_PATH;
+    ofn.Flags = OFN_FILEMUSTEXIST | OFN_HIDEREADONLY;
+
+    if (GetOpenFileNameA(&ofn)) {
+        HBITMAP hLoadedBitmap = (HBITMAP)LoadImageA(NULL, fileName, IMAGE_BITMAP, 0, 0, LR_LOADFROMFILE);
+        if (hLoadedBitmap) {
+            HDC hdcTemp = CreateCompatibleDC(g_hdcMem);
+            HBITMAP hOldTemp = (HBITMAP)SelectObject(hdcTemp, hLoadedBitmap);
+
+            BitBlt(g_hdcMem, 0, 0, DRAWING_WIDTH, WINDOW_HEIGHT, hdcTemp, 0, 0, SRCCOPY);
+
+            SelectObject(hdcTemp, hOldTemp);
+            DeleteDC(hdcTemp);
+            DeleteObject(hLoadedBitmap);
+
+            // Очищаем векторы при загрузке
+            g_points.clear();
+            g_rects.clear();
+            g_circles.clear();
+            g_texts.clear();
+
+            MessageBoxA(g_hWnd, "Комикс загружен!", "Загрузка", MB_OK);
+            cout << "Загружен файл: " << fileName << endl;
+        }
+        else {
+            MessageBoxA(g_hWnd, "Ошибка загрузки файла!", "Ошибка", MB_OK);
+        }
+    }
+}
+
+//  ПЕРЕРИСОВКА ОКНА 
+void RedrawWindow() {
+    InvalidateRect(g_hWnd, NULL, TRUE);
+    UpdateWindow(g_hWnd);
+}
